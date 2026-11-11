@@ -73,6 +73,12 @@
                            Register tmp3, Register tmp4,
                            bool isL);
 
+  void string_indexof_char_fast(Register str1, Register cnt1,
+                                Register ch, int ch_con,
+                                Register result,
+                                Register tmp1, Register tmp2,
+                                bool isL, bool ch_is_con);
+
   void string_indexof(Register str1, Register str2,
                       Register cnt1, Register cnt2,
                       Register tmp1, Register tmp2,
@@ -269,6 +275,13 @@
                             Register ch, Register result,
                             Register tmp1, Register tmp2,
                             bool isL);
+
+  void string_indexof_char_fast_v(Register str1, Register cnt1,
+                                  Register ch, int ch_con,
+                                  Register result,
+                                  Register tmp1, Register tmp2,
+                                  VectorRegister vtmp,
+                                  bool isL, bool ch_is_con);
 
   void minmax_fp_v(VectorRegister dst,
                   VectorRegister src1, VectorRegister src2,

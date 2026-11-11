@@ -640,6 +640,179 @@ void C2_MacroAssembler::string_indexof_char(Register str1, Register cnt1,
   BLOCK_COMMENT("} string_indexof_char");
 }
 
+// Latency-optimized scalar StringLatin1.indexOfChar using Zbb (orc.b + ctz).
+// Preserves str1, cnt1, and ch; does not touch RFLAGS (t1).
+void C2_MacroAssembler::string_indexof_char_fast(Register str1, Register cnt1,
+                                                 Register ch, int ch_con,
+                                                 Register result,
+                                                 Register tmp1, Register tmp2,
+                                                 bool isL, bool ch_is_con) {
+  assert(isL && UseZbb && !AvoidUnalignedAccesses, "Latin1 + Zbb + fast unaligned required");
+  if (ch_is_con) {
+    assert_different_registers(str1, cnt1, result, tmp1, tmp2, t0);
+  } else {
+    assert_different_registers(str1, cnt1, ch, result, tmp1, tmp2, t0);
+  }
+
+  auto emit_broadcast_lat1 = [&](Register dst, Register scratch) {
+    if (ch_is_con) {
+      uint64_t c8 = (uint64_t)ch_con & 0xffULL;
+      if (c8 == 0) {
+        mv(dst, zr);
+      } else if (c8 == 0xff) {
+        mv(dst, -1);
+      } else {
+        int32_t c32 = (int32_t)(c8 * 0x01010101ULL);
+        li(dst, (int64_t)c32);
+        slli(scratch, dst, 32);
+        if (c8 >= 0x80) {
+          srli(dst, scratch, 32);
+        }
+        orr(dst, dst, scratch);
+      }
+    } else {
+      zext_b(dst, ch);
+      slli(scratch, dst, 8);
+      orr(dst, dst, scratch);
+      slli(scratch, dst, 16);
+      orr(dst, dst, scratch);
+      slli(scratch, dst, 32);
+      orr(dst, dst, scratch);
+    }
+  };
+
+  Label L_SHORT, L_TAIL_INIT, L_LOOP, L_LOOP_HIT, L_LAST_8B,
+        L_BYTE_LOOP_INIT, L_BYTE_LOOP, L_NOMATCH, DONE;
+
+  BLOCK_COMMENT("string_indexof_char_fast {");
+
+  // Hot path: cnt1 >= 16 -> single branchless 16-byte probe via two 8B loads + Zbb orc.b/ctz
+  slti(t0, cnt1, 16);
+  bnez(t0, L_SHORT);
+
+  emit_broadcast_lat1(t0, result);
+  ld(tmp1, Address(str1, 0));
+  ld(tmp2, Address(str1, 8));
+  xorr(tmp1, tmp1, t0);
+  xorr(tmp2, tmp2, t0);
+  orc_b(tmp1, tmp1);
+  orc_b(tmp2, tmp2);
+  andr(t0, tmp1, tmp2);
+  addi(t0, t0, 1);
+  beqz(t0, L_TAIL_INIT);
+
+  notr(tmp1, tmp1);
+  notr(tmp2, tmp2);
+  ctz(result, tmp1);
+  ctz(tmp2, tmp2);
+  if (UseZicond) {
+    czero_nez(tmp2, tmp2, tmp1);
+    add(result, result, tmp2);
+    srli(result, result, 3);
+  } else {
+    seqz(t0, tmp1);
+    srli(result, result, 3);
+    srli(tmp2, tmp2, 3);
+    neg(t0, t0);
+    andr(tmp2, tmp2, t0);
+    addw(result, result, tmp2);
+  }
+  j(DONE);
+
+  // Tail path for cnt1 >= 16 when first 16 bytes missed
+  bind(L_TAIL_INIT);
+  emit_broadcast_lat1(tmp2, result);
+  mv(result, 16);
+
+  bind(L_LOOP);
+  sub(t0, cnt1, result);
+  slti(t0, t0, 8);
+  bnez(t0, L_LAST_8B);
+  add(tmp1, str1, result);
+  ld(tmp1, Address(tmp1, 0));
+  xorr(tmp1, tmp1, tmp2);
+  orc_b(tmp1, tmp1);
+  addi(t0, tmp1, 1);
+  bnez(t0, L_LOOP_HIT);
+  addi(result, result, 8);
+  j(L_LOOP);
+
+  bind(L_LOOP_HIT);
+  notr(tmp1, tmp1);
+  ctz(t0, tmp1);
+  srli(t0, t0, 3);
+  addw(result, result, t0);
+  j(DONE);
+
+  // Overlapped final 8 bytes [cnt1 - 8 .. cnt1 - 1] (safe because cnt1 >= 16)
+  bind(L_LAST_8B);
+  beq(result, cnt1, L_NOMATCH);
+  addi(result, cnt1, -8);
+  add(tmp1, str1, result);
+  ld(tmp1, Address(tmp1, 0));
+  xorr(tmp1, tmp1, tmp2);
+  orc_b(tmp1, tmp1);
+  notr(tmp1, tmp1);
+  beqz(tmp1, L_NOMATCH);
+  ctz(t0, tmp1);
+  srli(t0, t0, 3);
+  addw(result, result, t0);
+  j(DONE);
+
+  // Short path: 0 <= cnt1 < 16
+  bind(L_SHORT);
+  beqz(cnt1, L_NOMATCH);
+  slti(t0, cnt1, 8);
+  bnez(t0, L_BYTE_LOOP_INIT);
+
+  // 8 <= cnt1 < 16: two overlapped 8-byte loads covering [0..7] and [cnt1-8..cnt1-1]
+  emit_broadcast_lat1(t0, result);
+  ld(tmp1, Address(str1, 0));
+  add(tmp2, str1, cnt1);
+  ld(tmp2, Address(tmp2, -8));
+  xorr(tmp1, tmp1, t0);
+  xorr(tmp2, tmp2, t0);
+  orc_b(tmp1, tmp1);
+  orc_b(tmp2, tmp2);
+  notr(tmp1, tmp1);
+  notr(tmp2, tmp2);
+  Label L_SHORT_SECOND_8B;
+  beqz(tmp1, L_SHORT_SECOND_8B);
+  ctz(result, tmp1);
+  srli(result, result, 3);
+  j(DONE);
+
+  bind(L_SHORT_SECOND_8B);
+  beqz(tmp2, L_NOMATCH);
+  ctz(t0, tmp2);
+  srli(t0, t0, 3);
+  addi(result, cnt1, -8);
+  addw(result, result, t0);
+  j(DONE);
+
+  // 1 <= cnt1 < 8: compact byte loop
+  bind(L_BYTE_LOOP_INIT);
+  if (ch_is_con) {
+    li(tmp2, (int64_t)((uint64_t)ch_con & 0xffULL));
+  } else {
+    zext_b(tmp2, ch);
+  }
+  mv(result, zr);
+
+  bind(L_BYTE_LOOP);
+  add(tmp1, str1, result);
+  lbu(tmp1, Address(tmp1, 0));
+  beq(tmp1, tmp2, DONE);
+  addi(result, result, 1);
+  blt(result, cnt1, L_BYTE_LOOP);
+
+  bind(L_NOMATCH);
+  mv(result, -1);
+
+  bind(DONE);
+  BLOCK_COMMENT("} string_indexof_char_fast");
+}
+
 typedef void (MacroAssembler::* load_chr_insn)(Register rd, const Address &adr, Register temp);
 
 // Search for needle in haystack and return index or -1
@@ -3179,6 +3352,183 @@ void C2_MacroAssembler::string_indexof_char_v(Register str1, Register cnt1,
   add(result, result, tmp2);
 
   bind(DONE);
+}
+
+// Latency-optimized String.indexOf(char) for RVV:
+// 1. Preserves str1, cnt1, and ch (no input clobbering, no fixed R10..R13/v4..v7 pinning).
+// 2. For Latin1 with Zbb and fast unaligned accesses, probes the first 16 bytes purely in
+//    scalar GPRs (two parallel 8B loads + orc.b + branchless ctz), completely bypassing
+//    vsetvli and vfirst.m cross-domain latency on short-token workloads (KMeans/CSV/JSON).
+// 3. Uses tail-agnostic / mask-agnostic (ta, ma) vtype policies throughout to eliminate
+//    false physical vector register rename dependencies when vl < VLMAX.
+// 4. Uses fractional LMUL (16-byte VLMAX: mf4 on VLEN>=512, mf2 on VLEN==256, m1 on VLEN==128)
+//    for initial/short probes to minimize cache-line splits and mask reduction latency,
+//    then scales up to m1 for longer tail scans (> 16 bytes).
+void C2_MacroAssembler::string_indexof_char_fast_v(Register str1, Register cnt1,
+                                                   Register ch, int ch_con,
+                                                   Register result,
+                                                   Register tmp1, Register tmp2,
+                                                   VectorRegister vtmp,
+                                                   bool isL, bool ch_is_con) {
+  if (ch_is_con) {
+    assert_different_registers(str1, cnt1, result, tmp1, tmp2, t0);
+  } else {
+    assert_different_registers(str1, cnt1, ch, result, tmp1, tmp2, t0);
+  }
+
+  Assembler::SEW sew = isL ? Assembler::e8 : Assembler::e16;
+  // Cap initial/short probe VLMAX at 16 bytes (safe for both e8 and e16 on RV64 ELEN=64).
+  Assembler::LMUL lmul_16b = (MaxVectorSize >= 64) ? Assembler::mf4
+                           : (MaxVectorSize >= 32) ? Assembler::mf2
+                                                   : Assembler::m1;
+
+  auto emit_vmseq = [&](Register scratch) {
+    if (ch_is_con) {
+      int simm = isL ? (int)(int8_t)(uint8_t)ch_con
+                     : (int)(int16_t)(uint16_t)ch_con;
+      if (is_simm5(simm)) {
+        vmseq_vi(vtmp, vtmp, simm);
+      } else {
+        int64_t val = isL ? (int64_t)(uint8_t)ch_con
+                          : (int64_t)(uint16_t)ch_con;
+        li(scratch, val);
+        vmseq_vx(vtmp, vtmp, scratch);
+      }
+    } else {
+      vmseq_vx(vtmp, vtmp, ch);
+    }
+  };
+
+  Label L_VEC_LOOP, L_VEC_MATCH, L_NOMATCH, DONE;
+
+  BLOCK_COMMENT("string_indexof_char_fast_v {");
+
+  if (isL && UseZbb && !AvoidUnalignedAccesses) {
+    Label L_SHORT_16B, L_VEC_AFTER_16B;
+
+    // If cnt1 < 16 (0..15), handle with a single non-looping 16B RVV probe
+    slti(t0, cnt1, 16);
+    bnez(t0, L_SHORT_16B);
+
+    // Broadcast target byte across all 8 bytes of t0 (depends only on loop-invariant ch)
+    if (ch_is_con) {
+      uint64_t c8 = (uint64_t)ch_con & 0xffULL;
+      if (c8 == 0) {
+        mv(t0, zr);
+      } else if (c8 == 0xff) {
+        mv(t0, -1);
+      } else {
+        int32_t c32 = (int32_t)(c8 * 0x01010101ULL);
+        li(t0, (int64_t)c32);
+        slli(result, t0, 32);
+        if (c8 >= 0x80) {
+          srli(t0, result, 32);
+        }
+        orr(t0, t0, result);
+      }
+    } else {
+      zext_b(t0, ch);
+      slli(result, t0, 8);
+      orr(t0, t0, result);
+      slli(result, t0, 16);
+      orr(t0, t0, result);
+      slli(result, t0, 32);
+      orr(t0, t0, result);
+    }
+
+    // Parallel 16-byte scalar probe (zero vector-to-GPR transfer stall, zero taken branches on hit)
+    ld(tmp1, Address(str1, 0));
+    ld(tmp2, Address(str1, 8));
+    xorr(tmp1, tmp1, t0);
+    xorr(tmp2, tmp2, t0);
+    orc_b(tmp1, tmp1);
+    orc_b(tmp2, tmp2);
+    andr(t0, tmp1, tmp2);
+    addi(t0, t0, 1);
+    beqz(t0, L_VEC_AFTER_16B);
+
+    notr(tmp1, tmp1);
+    notr(tmp2, tmp2);
+    ctz(result, tmp1);
+    ctz(tmp2, tmp2);
+    if (UseZicond) {
+      czero_nez(tmp2, tmp2, tmp1);
+      add(result, result, tmp2);
+      srli(result, result, 3);
+    } else {
+      seqz(t0, tmp1);
+      srli(result, result, 3);
+      srli(tmp2, tmp2, 3);
+      neg(t0, t0);
+      andr(tmp2, tmp2, t0);
+      addw(result, result, tmp2);
+    }
+    j(DONE);
+
+    // 0 <= cnt1 <= 15: single 16-byte RVV probe covers all remaining bytes without looping
+    bind(L_SHORT_16B);
+    beqz(cnt1, L_NOMATCH);
+    vsetvli(zr, cnt1, Assembler::e8, lmul_16b, Assembler::ma, Assembler::ta);
+    vle8_v(vtmp, str1);
+    emit_vmseq(t0);
+    vfirst_m(result, vtmp); // writes 0..14 on hit, or -1 on miss
+    j(DONE);
+
+    // cnt1 >= 16 and first 16 bytes missed: advance by 16 and scan remaining bytes with m1
+    bind(L_VEC_AFTER_16B);
+    subi(tmp1, cnt1, 16);
+    beqz(tmp1, L_NOMATCH);
+    mv(result, 16);
+    addi(tmp2, str1, 16);
+  } else {
+    // Two-gear RVV path (for UTF-16 or targets without Zbb / fast unaligned scalar loads):
+    // Gear 1: low-latency 16-byte probe (lmul_16b, ma, ta)
+    beqz(cnt1, L_NOMATCH);
+    vsetvli(tmp1, cnt1, sew, lmul_16b, Assembler::ma, Assembler::ta);
+    vlex_v(vtmp, str1, sew);
+    emit_vmseq(t0);
+    vfirst_m(result, vtmp);
+    bgez(result, DONE);
+
+    sub(tmp1, cnt1, tmp1);
+    beqz(tmp1, L_NOMATCH);
+    sub(result, cnt1, tmp1);
+    if (isL) {
+      add(tmp2, str1, result);
+    } else {
+      shift_left_add(tmp2, result, str1, 1, tmp2);
+    }
+  }
+
+  // Gear 2: m1 vector loop with tail-agnostic & mask-agnostic policy
+  // Invariants at L_VEC_LOOP:
+  //   result = chars scanned so far
+  //   tmp1   = remaining chars (> 0)
+  //   tmp2   = current byte address
+  bind(L_VEC_LOOP);
+  vsetvli(t0, tmp1, sew, Assembler::m1, Assembler::ma, Assembler::ta);
+  vlex_v(vtmp, tmp2, sew);
+  sub(tmp1, tmp1, t0);
+  if (isL) {
+    add(tmp2, tmp2, t0);
+  } else {
+    shift_left_add(tmp2, t0, tmp2, 1, t0);
+  }
+  emit_vmseq(t0);
+  vfirst_m(t0, vtmp);
+  bgez(t0, L_VEC_MATCH);
+  sub(result, cnt1, tmp1);
+  bnez(tmp1, L_VEC_LOOP);
+
+  bind(L_NOMATCH);
+  mv(result, -1);
+  j(DONE);
+
+  bind(L_VEC_MATCH);
+  addw(result, result, t0);
+
+  bind(DONE);
+  BLOCK_COMMENT("} string_indexof_char_fast_v");
 }
 
 // Set dst to NaN if any NaN input.

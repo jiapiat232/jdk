@@ -11924,7 +11924,8 @@ instruct stringL_indexof_char(iRegP_R11 str1, iRegI_R12 cnt1, iRegI_R13 ch,
                               iRegINoSp tmp3, iRegINoSp tmp4, rFlagsReg cr)
 %{
   match(Set result (StrIndexOfChar (Binary str1 cnt1) ch));
-  predicate(!UseRVV && (((StrIndexOfCharNode*)n)->encoding() == StrIntrinsicNode::L));
+  predicate(!UseRVV && !(UseFastStringIndexOfChar && UseZbb && !AvoidUnalignedAccesses) &&
+            (((StrIndexOfCharNode*)n)->encoding() == StrIntrinsicNode::L));
   effect(USE_KILL str1, USE_KILL cnt1, USE_KILL ch, TEMP_DEF result,
          TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4, KILL cr);
 
@@ -11933,6 +11934,42 @@ instruct stringL_indexof_char(iRegP_R11 str1, iRegI_R12 cnt1, iRegI_R13 ch,
     __ string_indexof_char($str1$$Register, $cnt1$$Register, $ch$$Register,
                            $result$$Register, $tmp1$$Register, $tmp2$$Register,
                            $tmp3$$Register, $tmp4$$Register, true /* isL */);
+  %}
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct stringL_indexof_char_fast(iRegPNoSp str1, iRegINoSp cnt1, iRegINoSp ch,
+                                   iRegINoSp result, iRegLNoSp tmp1, iRegLNoSp tmp2)
+%{
+  match(Set result (StrIndexOfChar (Binary str1 cnt1) ch));
+  predicate(!UseRVV && UseFastStringIndexOfChar && UseZbb && !AvoidUnalignedAccesses &&
+            (((StrIndexOfCharNode*)n)->encoding() == StrIntrinsicNode::L));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2);
+
+  format %{ "StringLatin1 IndexOf fast char[] $str1, $cnt1, $ch -> $result" %}
+  ins_encode %{
+    __ string_indexof_char_fast($str1$$Register, $cnt1$$Register,
+                                $ch$$Register, 0,
+                                $result$$Register, $tmp1$$Register, $tmp2$$Register,
+                                true /* isL */, false /* ch_is_con */);
+  %}
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct stringL_indexof_char_fast_imm(iRegPNoSp str1, iRegINoSp cnt1, immI ch,
+                                       iRegINoSp result, iRegLNoSp tmp1, iRegLNoSp tmp2)
+%{
+  match(Set result (StrIndexOfChar (Binary str1 cnt1) ch));
+  predicate(!UseRVV && UseFastStringIndexOfChar && UseZbb && !AvoidUnalignedAccesses &&
+            (((StrIndexOfCharNode*)n)->encoding() == StrIntrinsicNode::L));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2);
+
+  format %{ "StringLatin1 IndexOf fast imm char[] $str1, $cnt1, $ch -> $result" %}
+  ins_encode %{
+    __ string_indexof_char_fast($str1$$Register, $cnt1$$Register,
+                                noreg, $ch$$constant,
+                                $result$$Register, $tmp1$$Register, $tmp2$$Register,
+                                true /* isL */, true /* ch_is_con */);
   %}
   ins_pipe(pipe_class_memory);
 %}

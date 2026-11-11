@@ -4580,7 +4580,8 @@ instruct vstringU_indexof_char(iRegP_R11 str1, iRegI_R12 cnt1, iRegI_R13 ch,
                                iRegI_R10 result, iRegINoSp tmp1, iRegINoSp tmp2,
                                vReg_V4 v4, vReg_V5 v5, vReg_V6 v6, vReg_V7 v7)
 %{
-  predicate(UseRVV && (((StrIndexOfCharNode*)n)->encoding() == StrIntrinsicNode::U));
+  predicate(UseRVV && !UseFastStringIndexOfChar &&
+            (((StrIndexOfCharNode*)n)->encoding() == StrIntrinsicNode::U));
   match(Set result (StrIndexOfChar (Binary str1 cnt1) ch));
   effect(TEMP_DEF result, USE_KILL str1, USE_KILL cnt1, USE_KILL ch,
          TEMP tmp1, TEMP tmp2, TEMP v4, TEMP v5, TEMP v6, TEMP v7);
@@ -4600,7 +4601,8 @@ instruct vstringL_indexof_char(iRegP_R11 str1, iRegI_R12 cnt1, iRegI_R13 ch,
                                iRegI_R10 result, iRegINoSp tmp1, iRegINoSp tmp2,
                                vReg_V4 v4, vReg_V5 v5, vReg_V6 v6, vReg_V7 v7)
 %{
-  predicate(UseRVV && (((StrIndexOfCharNode*)n)->encoding() == StrIntrinsicNode::L));
+  predicate(UseRVV && !UseFastStringIndexOfChar &&
+            (((StrIndexOfCharNode*)n)->encoding() == StrIntrinsicNode::L));
   match(Set result (StrIndexOfChar (Binary str1 cnt1) ch));
   effect(TEMP_DEF result, USE_KILL str1, USE_KILL cnt1, USE_KILL ch,
          TEMP tmp1, TEMP tmp2, TEMP v4, TEMP v5, TEMP v6, TEMP v7);
@@ -4611,6 +4613,94 @@ instruct vstringL_indexof_char(iRegP_R11 str1, iRegI_R12 cnt1, iRegI_R13 ch,
     __ string_indexof_char_v($str1$$Register, $cnt1$$Register, $ch$$Register,
                              $result$$Register, $tmp1$$Register, $tmp2$$Register,
                              true /* isL */);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct vstringU_indexof_char_fast(iRegPNoSp str1, iRegINoSp cnt1, iRegINoSp ch,
+                                    iRegINoSp result, iRegLNoSp tmp1, iRegLNoSp tmp2,
+                                    vReg vtmp)
+%{
+  predicate(UseRVV && UseFastStringIndexOfChar &&
+            (((StrIndexOfCharNode*)n)->encoding() == StrIntrinsicNode::U));
+  match(Set result (StrIndexOfChar (Binary str1 cnt1) ch));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP vtmp);
+
+  format %{ "StringUTF16 IndexOf fast char[] $str1, $cnt1, $ch -> $result" %}
+
+  ins_encode %{
+    __ string_indexof_char_fast_v($str1$$Register, $cnt1$$Register,
+                                  $ch$$Register, 0,
+                                  $result$$Register, $tmp1$$Register, $tmp2$$Register,
+                                  as_VectorRegister($vtmp$$reg),
+                                  false /* isL */, false /* ch_is_con */);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct vstringU_indexof_char_fast_imm(iRegPNoSp str1, iRegINoSp cnt1, immI ch,
+                                        iRegINoSp result, iRegLNoSp tmp1, iRegLNoSp tmp2,
+                                        vReg vtmp)
+%{
+  predicate(UseRVV && UseFastStringIndexOfChar &&
+            (((StrIndexOfCharNode*)n)->encoding() == StrIntrinsicNode::U));
+  match(Set result (StrIndexOfChar (Binary str1 cnt1) ch));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP vtmp);
+
+  format %{ "StringUTF16 IndexOf fast imm char[] $str1, $cnt1, $ch -> $result" %}
+
+  ins_encode %{
+    __ string_indexof_char_fast_v($str1$$Register, $cnt1$$Register,
+                                  noreg, $ch$$constant,
+                                  $result$$Register, $tmp1$$Register, $tmp2$$Register,
+                                  as_VectorRegister($vtmp$$reg),
+                                  false /* isL */, true /* ch_is_con */);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct vstringL_indexof_char_fast(iRegPNoSp str1, iRegINoSp cnt1, iRegINoSp ch,
+                                    iRegINoSp result, iRegLNoSp tmp1, iRegLNoSp tmp2,
+                                    vReg vtmp)
+%{
+  predicate(UseRVV && UseFastStringIndexOfChar &&
+            (((StrIndexOfCharNode*)n)->encoding() == StrIntrinsicNode::L));
+  match(Set result (StrIndexOfChar (Binary str1 cnt1) ch));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP vtmp);
+
+  format %{ "StringLatin1 IndexOf fast char[] $str1, $cnt1, $ch -> $result" %}
+
+  ins_encode %{
+    __ string_indexof_char_fast_v($str1$$Register, $cnt1$$Register,
+                                  $ch$$Register, 0,
+                                  $result$$Register, $tmp1$$Register, $tmp2$$Register,
+                                  as_VectorRegister($vtmp$$reg),
+                                  true /* isL */, false /* ch_is_con */);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct vstringL_indexof_char_fast_imm(iRegPNoSp str1, iRegINoSp cnt1, immI ch,
+                                        iRegINoSp result, iRegLNoSp tmp1, iRegLNoSp tmp2,
+                                        vReg vtmp)
+%{
+  predicate(UseRVV && UseFastStringIndexOfChar &&
+            (((StrIndexOfCharNode*)n)->encoding() == StrIntrinsicNode::L));
+  match(Set result (StrIndexOfChar (Binary str1 cnt1) ch));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP vtmp);
+
+  format %{ "StringLatin1 IndexOf fast imm char[] $str1, $cnt1, $ch -> $result" %}
+
+  ins_encode %{
+    __ string_indexof_char_fast_v($str1$$Register, $cnt1$$Register,
+                                  noreg, $ch$$constant,
+                                  $result$$Register, $tmp1$$Register, $tmp2$$Register,
+                                  as_VectorRegister($vtmp$$reg),
+                                  true /* isL */, true /* ch_is_con */);
   %}
 
   ins_pipe(pipe_class_memory);
